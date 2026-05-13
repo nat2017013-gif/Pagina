@@ -12,7 +12,9 @@ from scipy import stats
 import io
 import warnings
 warnings.filterwarnings("ignore")
-
+import streamlit as st
+st.title("Prueba de conexión - Sistema CEP")
+st.write("Si puedes leer esto, el servidor funciona y el problema está en el resto del código.")
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTES CORPORATIVAS
 # ─────────────────────────────────────────────────────────────────────────────
