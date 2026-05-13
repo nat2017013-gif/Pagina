@@ -72,42 +72,6 @@ def shapiro_test(vals):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REGLAS DE SENSIBILIZACIÓN (Nelson / Western Electric)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def sensitization_rules(xbars, UCL, LCL, z1u, z1l, z2u, z2l, CL):
-    n = len(xbars)
-    res = []
-
-    h1 = [i for i in range(n) if xbars[i] > UCL or xbars[i] < LCL]
-    res.append({"rule": 1, "desc": "1 punto fuera de ±3σ (límites de control)", "hits": h1})
-
-    h2 = [i for i in range(8, n) if all(x > CL for x in xbars[i-8:i+1]) or all(x < CL for x in xbars[i-8:i+1])]
-    res.append({"rule": 2, "desc": "9 puntos consecutivos en el mismo lado de la LC", "hits": h2})
-
-    h3 = [i for i in range(5, n) if all(xbars[i-5+j] < xbars[i-5+j+1] for j in range(5)) or
-                                     all(xbars[i-5+j] > xbars[i-5+j+1] for j in range(5))]
-    res.append({"rule": 3, "desc": "6 puntos consecutivos con tendencia monótona", "hits": h3})
-
-    h4 = [i for i in range(13, n) if all((xbars[i-13+j]-xbars[i-13+j+1])*(xbars[i-13+j+1]-xbars[i-13+j+2]) < 0 for j in range(12))]
-    res.append({"rule": 4, "desc": "14 puntos alternando arriba/abajo", "hits": h4})
-
-    h5 = [i for i in range(2, n) if sum(x > z2u for x in xbars[i-2:i+1]) >= 2 or sum(x < z2l for x in xbars[i-2:i+1]) >= 2]
-    res.append({"rule": 5, "desc": "2 de 3 consecutivos en zona A (>2σ)", "hits": h5})
-
-    h6 = [i for i in range(4, n) if sum(x > z1u for x in xbars[i-4:i+1]) >= 4 or sum(x < z1l for x in xbars[i-4:i+1]) >= 4]
-    res.append({"rule": 6, "desc": "4 de 5 puntos en zona B o más (>1σ)", "hits": h6})
-
-    h7 = [i for i in range(14, n) if all(z1l < x < z1u for x in xbars[i-14:i+1])]
-    res.append({"rule": 7, "desc": "15 puntos dentro de ±1σ (estratificación)", "hits": h7})
-
-    h8 = [i for i in range(7, n) if all(x < z1l or x > z1u for x in xbars[i-7:i+1])]
-    res.append({"rule": 8, "desc": "8 puntos fuera de zona C (mezcla)", "hits": h8})
-
-    return res
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # CÁLCULO PRINCIPAL CEP
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,7 +105,6 @@ def compute_spc(df, x_cols, n):
 
     sx = list(df[df["xbar"].gt(UCLx) | df["xbar"].lt(LCLx)].index)
     sr = list(df[df["R"].gt(UCLr) | ((LCLr > 0) & df["R"].lt(LCLr))].index)
-    sens = sensitization_rules(df["xbar"].values, UCLx, LCLx, z1u, z1l, z2u, z2l, xb)
 
     return {
         "df": df, "x_cols": x_cols, "n": n, "consts": co,
@@ -150,7 +113,7 @@ def compute_spc(df, x_cols, n):
         "z1u": z1u, "z1l": z1l, "z2u": z2u, "z2l": z2l,
         "Cp": Cp, "Cpu": Cpu, "Cpl": Cpl, "Cpk": Cpk,
         "pnc_low": pnc_low, "pnc_high": pnc_high, "pnc_total": pnc_low+pnc_high,
-        "all_vals": all_vals, "sw": sw, "signals_x": sx, "signals_r": sr, "sens_rules": sens
+        "all_vals": all_vals, "sw": sw, "signals_x": sx, "signals_r": sr
     }
 
 
@@ -223,12 +186,6 @@ def export_excel(s, eco):
                 round(s["sw"]["p"], 5) if s["sw"]["p"] else "N/A",
             ]
         }).to_excel(writer, sheet_name="Capacidad", index=False)
-
-        pd.DataFrame([{
-            "Regla": f"Regla {r['rule']}", "Descripción": r["desc"],
-            "Activada": "SÍ" if r["hits"] else "NO",
-            "Subgrupos": (str([h+1 for h in r["hits"]]) if r["hits"] else "—")
-        } for r in s["sens_rules"]]).to_excel(writer, sheet_name="Reglas_Sensibilizacion", index=False)
 
         pd.DataFrame({
             "Concepto": ["Sobrellenado promedio (g)", "Sacos/mes", "Sacos/año",
