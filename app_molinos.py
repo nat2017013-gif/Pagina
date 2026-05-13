@@ -12,9 +12,7 @@ from scipy import stats
 import io
 import warnings
 warnings.filterwarnings("ignore")
-import streamlit as st
-st.title("Prueba de conexión - Sistema CEP")
-st.write("Si puedes leer esto, el servidor funciona y el problema está en el resto del código.")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTES CORPORATIVAS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,3 +197,5 @@ def export_excel(s, eco):
             ]
         }).to_excel(writer, sheet_name="Economico", index=False)
     return buf.getvalue()
+if __name__ == "__main__":
+    main()
