@@ -1050,7 +1050,7 @@ def page_monitoreo():
         unsafe_allow_html=True,
     )
 
-    # ── Límites fijos ──────────────────────────────────────────────────────────
+    # ── Límites de control ────────────────────────────────────────────────────
     with st.container():
         st.markdown("""
         <div style="background:#EEF6FD;border:1px solid #BDD7EE;
@@ -1058,18 +1058,18 @@ def page_monitoreo():
              padding:.7rem 1.1rem .5rem;margin-bottom:.6rem;">
           <span style="font-size:.66rem;font-weight:700;color:#2563A8;
                text-transform:uppercase;letter-spacing:.85px;">
-            🔒 Límites de Control Fijos — Fase I (Estabilización)
+            🔒 Límites de Control — Fase I (Referencia) · Bloques Fase II calculan sus propios límites
           </span>
         </div>
         """, unsafe_allow_html=True)
         lf1, lf2, lf3, lf4, lf5, lf6 = st.columns(6)
         for col, lbl, val in [
-            (lf1, "LCS X̄ (fijo)",  f"{UCL_fijo:.4f} kg"),
-            (lf2, "LC X̄ (fijo)",   f"{CL_fijo:.4f} kg"),
-            (lf3, "LCI X̄ (fijo)",  f"{LCL_fijo:.4f} kg"),
-            (lf4, "LCS R (fijo)",   f"{UCLr_fijo:.4f} kg"),
-            (lf5, "R̄ (fijo)",      f"{CLr_fijo:.4f} kg"),
-            (lf6, "n (fijo)",       str(n_fijo)),
+            (lf1, "LCS X̄ (Fase I)",  f"{UCL_fijo:.4f} kg"),
+            (lf2, "LC X̄ (Fase I)",   f"{CL_fijo:.4f} kg"),
+            (lf3, "LCI X̄ (Fase I)",  f"{LCL_fijo:.4f} kg"),
+            (lf4, "LCS R (Fase I)",   f"{UCLr_fijo:.4f} kg"),
+            (lf5, "R̄ (Fase I)",      f"{CLr_fijo:.4f} kg"),
+            (lf6, "n (Fase I)",       str(n_fijo)),
         ]:
             with col:
                 st.metric(lbl, val)
@@ -1330,68 +1330,155 @@ def page_monitoreo():
             n_hist   = len(s["df"]); df_hist = s["df"].copy()
             idx_hist = list(range(1, n_hist+1))
 
-            # Acumular todos los subgrupos nuevos de todos los bloques
+            # ── Acumular subgrupos nuevos de todos los bloques, con límites por bloque ──
             _all_xbar    = []
             _all_R       = []
             _all_idx_new = []
             _cursor      = n_hist + 1
-            _bloque_boundaries = []   # (start_idx, end_idx, bloque_num)
+            _bloque_boundaries = []   # (start_idx, end_idx, bloque_num, UCL_bk, LCL_bk, CL_bk, UCLr_bk, LCLr_bk, CLr_bk, n_bk)
 
             for _bk_idx, _bk in enumerate(_bloques):
                 _bk_proc = _bk.get("_df_proc")
                 if _bk_proc is None:
                     continue
-                _bk_len = len(_bk_proc)
+                _bk_n    = int(_bk["n"])
+                _bk_len  = len(_bk_proc)
                 _bk_idx_new = list(range(_cursor, _cursor + _bk_len))
-                _all_xbar   += list(_bk_proc["xbar"])
-                _all_R      += list(_bk_proc["R"])
+
+                # ── Límites propios del bloque según su n ──────────────────────
+                _bk_xbar_list = list(_bk_proc["xbar"])
+                _bk_R_list    = list(_bk_proc["R"])
+                _bk_xbar_bar  = float(np.mean(_bk_xbar_list))
+                _bk_R_bar     = float(np.mean(_bk_R_list))
+                _bk_cc        = CONTROL_CONSTANTS.get(_bk_n, CONTROL_CONSTANTS[min(CONTROL_CONSTANTS.keys(), key=lambda k: abs(k-_bk_n))])
+                _bk_UCL       = _bk_xbar_bar + _bk_cc["A2"] * _bk_R_bar
+                _bk_LCL       = _bk_xbar_bar - _bk_cc["A2"] * _bk_R_bar
+                _bk_UCLr      = _bk_cc["D4"] * _bk_R_bar
+                _bk_LCLr      = _bk_cc["D3"] * _bk_R_bar
+
+                _all_xbar    += _bk_xbar_list
+                _all_R       += _bk_R_list
                 _all_idx_new += _bk_idx_new
-                _bloque_boundaries.append((_cursor, _cursor + _bk_len - 1, _bk_idx + 1))
+                _bloque_boundaries.append((
+                    _cursor, _cursor + _bk_len - 1, _bk_idx + 1,
+                    _bk_UCL, _bk_LCL, _bk_xbar_bar,
+                    _bk_UCLr, _bk_LCLr, _bk_R_bar, _bk_n
+                ))
                 _cursor += _bk_len
 
             n_new   = len(_all_xbar)
             idx_new = _all_idx_new
 
-            new_signals = [i for i, xb_n in enumerate(_all_xbar)
-                           if xb_n > UCL_fijo or xb_n < LCL_fijo]
-            new_colors  = [CR if i in new_signals else "#E67E22" for i in range(n_new)]
+            # ── Señales usando límites propios de cada bloque ──────────────────
+            new_signals   = []
+            new_r_signals = []
+            _all_UCL_seq  = []   # UCL correspondiente a cada punto nuevo (para Y-range)
+            _all_LCL_seq  = []
+            _offset = 0
+            for _bnd in _bloque_boundaries:
+                _bnd_start, _bnd_end, _bnd_num, _bk_UCL, _bk_LCL, _bk_CL, _bk_UCLr, _bk_LCLr, _bk_CLr, _bk_n = _bnd
+                _bk_len = _bnd_end - _bnd_start + 1
+                for _li in range(_bk_len):
+                    _gi = _offset + _li
+                    if _gi < len(_all_xbar) and (_all_xbar[_gi] > _bk_UCL or _all_xbar[_gi] < _bk_LCL):
+                        new_signals.append(_gi)
+                    if _gi < len(_all_R) and _all_R[_gi] > _bk_UCLr:
+                        new_r_signals.append(_gi)
+                    _all_UCL_seq.append(_bk_UCL)
+                    _all_LCL_seq.append(_bk_LCL)
+                _offset += _bk_len
 
+            _C_NEW     = "#E67E22"   # naranja — puntos Fase II
+            _LC_COLOR  = "#1B4F72"   # azul profundo — LC histórico
+            _LIM_COLOR = "#C0392B"   # rojo contenido — límites / señales
+            _C_GREEN   = "#1E8449"   # verde — carta R
+
+            new_signals_set   = set(new_signals)
+            new_r_signals_set = set(new_r_signals)
+            new_colors   = [_LIM_COLOR if i in new_signals_set   else _C_NEW for i in range(n_new)]
+            new_r_colors = [_LIM_COLOR if i in new_r_signals_set else _C_NEW for i in range(n_new)]
+
+            # ════════════════════════════════════════════════════════════════════
+            # CARTA X̄  — una sola figura continua, límites segmentados por bloque
+            # ════════════════════════════════════════════════════════════════════
             fig_mon = go.Figure()
+
+            # Fondo histórico: bandas suaves usando límites Fase I
             for y0, y1, col_bg in [
-                (LCL_fijo, CL_fijo - (CL_fijo-LCL_fijo)*2/3, "rgba(231,76,60,.05)"),
-                (CL_fijo + (UCL_fijo-CL_fijo)*2/3, UCL_fijo,  "rgba(231,76,60,.05)"),
-                (CL_fijo - (CL_fijo-LCL_fijo)/3, CL_fijo + (UCL_fijo-CL_fijo)/3, "rgba(39,174,96,.05)"),
+                (LCL_fijo, CL_fijo - (CL_fijo-LCL_fijo)*2/3, "rgba(44,62,80,.035)"),
+                (CL_fijo + (UCL_fijo-CL_fijo)*2/3, UCL_fijo,  "rgba(44,62,80,.035)"),
+                (CL_fijo - (CL_fijo-LCL_fijo)/3,   CL_fijo + (UCL_fijo-CL_fijo)/3, "rgba(37,99,168,.04)"),
             ]:
-                fig_mon.add_hrect(y0=y0, y1=y1, fillcolor=col_bg, line_width=0)
-            _LC_COLOR  = "#1B4F72"
-            _LIM_COLOR = "#C0392B"
+                fig_mon.add_hrect(y0=y0, y1=y1, x0=0, x1=n_hist+0.5,
+                                  fillcolor=col_bg, line_width=0)
+
+            # Líneas de control Fase I (solo sobre el segmento histórico)
             for y, lbl, col_ln, dash, lw in [
-                (UCL_fijo, f"LCS = {UCL_fijo:.3f}", _LIM_COLOR, "dash",  2.5),
-                (CL_fijo,  f"LC = {CL_fijo:.3f}",   _LC_COLOR,  "solid", 2.2),
-                (LCL_fijo, f"LCI = {LCL_fijo:.3f}", _LIM_COLOR, "dash",  2.5),
+                (UCL_fijo, f"LCS₀={UCL_fijo:.3f}",  _LIM_COLOR, "dash",  1.8),
+                (CL_fijo,  f"LC₀={CL_fijo:.3f}",    _LC_COLOR,  "solid", 1.8),
+                (LCL_fijo, f"LCI₀={LCL_fijo:.3f}",  _LIM_COLOR, "dash",  1.8),
             ]:
-                fig_mon.add_hline(y=y, line_dash=dash, line_color=col_ln, line_width=lw,
-                                  annotation_text=lbl, annotation_position="right",
-                                  annotation_font_size=10, annotation_font_color=col_ln,
-                                  annotation_bgcolor="rgba(255,255,255,.75)")
-            fig_mon.add_vline(x=n_hist+0.5, line_dash="dot", line_color="#95A5A6", line_width=1.6,
-                              annotation_text="▶ Fase II", annotation_font_size=10,
-                              annotation_font_color="#5D6D7E",
+                fig_mon.add_shape(type="line",
+                    x0=0.5, x1=n_hist+0.5, y0=y, y1=y,
+                    line=dict(color=col_ln, dash=dash, width=lw))
+                fig_mon.add_annotation(
+                    x=n_hist+0.5, y=y, text=f" {lbl}", showarrow=False,
+                    xanchor="left", font=dict(size=9, color=col_ln),
+                    bgcolor="rgba(255,255,255,.7)")
+
+            # Separador Fase I → Fase II
+            fig_mon.add_vline(x=n_hist+0.5, line_dash="dot", line_color="#7F8C8D",
+                              line_width=1.4, annotation_text="▶ Fase II",
+                              annotation_font_size=9, annotation_font_color="#5D6D7E",
                               annotation_bgcolor="rgba(255,255,255,.8)")
-            # Líneas divisorias entre bloques
-            for _bnd_start, _bnd_end, _bnd_num in _bloque_boundaries[1:]:
-                fig_mon.add_vline(x=_bnd_start - 0.5, line_dash="dot",
-                                  line_color="#8E44AD", line_width=1.2,
-                                  annotation_text=f"B{_bnd_num}",
-                                  annotation_font_size=9, annotation_font_color="#8E44AD",
-                                  annotation_bgcolor="rgba(255,255,255,.7)")
+
+            # Líneas de control y separadores por bloque Fase II
+            _prev_right = n_hist + 0.5
+            for _bnd in _bloque_boundaries:
+                _bnd_start, _bnd_end, _bnd_num, _bk_UCL, _bk_LCL, _bk_CL, _bk_UCLr, _bk_LCLr, _bk_CLr, _bk_n = _bnd
+                _seg_x0 = _prev_right
+                _seg_x1 = _bnd_end + 0.5
+                # Fondo suave para este bloque
+                fig_mon.add_hrect(y0=_bk_LCL, y1=_bk_CL - (_bk_CL-_bk_LCL)*2/3,
+                                  x0=_seg_x0, x1=_seg_x1,
+                                  fillcolor="rgba(231,76,60,.04)", line_width=0)
+                fig_mon.add_hrect(y0=_bk_CL + (_bk_UCL-_bk_CL)*2/3, y1=_bk_UCL,
+                                  x0=_seg_x0, x1=_seg_x1,
+                                  fillcolor="rgba(231,76,60,.04)", line_width=0)
+                fig_mon.add_hrect(y0=_bk_CL - (_bk_CL-_bk_LCL)/3,
+                                  y1=_bk_CL + (_bk_UCL-_bk_CL)/3,
+                                  x0=_seg_x0, x1=_seg_x1,
+                                  fillcolor="rgba(37,99,168,.04)", line_width=0)
+                # Líneas de control del bloque
+                for y, lbl, col_ln, dash, lw in [
+                    (_bk_UCL, f"LCS{_bnd_num}={_bk_UCL:.3f} (n={_bk_n})", _LIM_COLOR, "dash",  1.8),
+                    (_bk_CL,  f"LC{_bnd_num}={_bk_CL:.3f}",               "#2563A8",  "solid", 1.8),
+                    (_bk_LCL, f"LCI{_bnd_num}={_bk_LCL:.3f}",             _LIM_COLOR, "dash",  1.8),
+                ]:
+                    fig_mon.add_shape(type="line",
+                        x0=_seg_x0, x1=_seg_x1, y0=y, y1=y,
+                        line=dict(color=col_ln, dash=dash, width=lw))
+                    fig_mon.add_annotation(
+                        x=_seg_x1, y=y, text=f" {lbl}", showarrow=False,
+                        xanchor="left", font=dict(size=9, color=col_ln),
+                        bgcolor="rgba(255,255,255,.7)")
+                # Separador entre bloques Fase II (excepto el primero)
+                if _bnd_num > 1:
+                    fig_mon.add_vline(x=_seg_x0, line_dash="dot",
+                                      line_color="#8E44AD", line_width=1.2,
+                                      annotation_text=f"B{_bnd_num} n={_bk_n}",
+                                      annotation_font_size=9, annotation_font_color="#8E44AD",
+                                      annotation_bgcolor="rgba(255,255,255,.7)")
+                _prev_right = _seg_x1
+
+            # Serie histórica
             hist_colors_mon = [_LIM_COLOR if ix in set(s["signals_x"]) else _LC_COLOR
                                for ix in df_hist.index]
             fig_mon.add_trace(go.Scatter(
                 x=idx_hist, y=df_hist["xbar"], mode="lines+markers", name="Histórico (Fase I)",
-                line=dict(color=_LC_COLOR, width=1.6),
-                marker=dict(color=hist_colors_mon, size=7, opacity=0.72,
-                            line=dict(color="white", width=1.1)),
+                line=dict(color=_LC_COLOR, width=1.5),
+                marker=dict(color=hist_colors_mon, size=7, opacity=0.75,
+                            line=dict(color="white", width=1.2), symbol="circle"),
                 hovertemplate=(
                     "<b>Subgrupo %{x}</b><br>"
                     "x̄ = %{y:.4f} kg<br>"
@@ -1399,11 +1486,12 @@ def page_monitoreo():
                     "<extra></extra>"
                 )
             ))
+            # Serie Fase II
             fig_mon.add_trace(go.Scatter(
                 x=idx_new, y=_all_xbar, mode="lines+markers", name="Nuevos (Fase II)",
-                line=dict(color="#E67E22", width=2.4),
-                marker=dict(color=new_colors, size=11,
-                            line=dict(color="white", width=2.0)),
+                line=dict(color=_C_NEW, width=2.2),
+                marker=dict(color=new_colors, size=10,
+                            line=dict(color="white", width=1.8), symbol="circle"),
                 hovertemplate=(
                     "<b>Subgrupo %{x}</b><br>"
                     "x̄ = %{y:.4f} kg<br>"
@@ -1411,13 +1499,14 @@ def page_monitoreo():
                     "<extra></extra>"
                 )
             ))
+            # Señales fuera de control — marcador X grande y visible
             if new_signals:
                 si_new = [idx_new[i] for i in new_signals]
                 sv_new = [_all_xbar[i] for i in new_signals]
                 fig_mon.add_trace(go.Scatter(
-                    x=si_new, y=sv_new, mode="markers", name="🚨 SEÑAL",
-                    marker=dict(color=_LIM_COLOR, size=18, symbol="x-open",
-                                line=dict(color=_LIM_COLOR, width=3)),
+                    x=si_new, y=sv_new, mode="markers", name="🚨 SEÑAL X̄",
+                    marker=dict(color=_LIM_COLOR, size=20, symbol="x-open",
+                                line=dict(color=_LIM_COLOR, width=3.5)),
                     hovertemplate=(
                         "<b>⚠ FUERA DE CONTROL</b><br>"
                         "Subgrupo %{x}<br>"
@@ -1425,71 +1514,113 @@ def page_monitoreo():
                         "<extra>🚨 Señal</extra>"
                     )
                 ))
-            # Rango Y fijo: basado en UCL/LCL + 10% padding — sin auto-scale
-            _rng_pad = (UCL_fijo - LCL_fijo) * 0.10
-            _y_lo    = LCL_fijo - _rng_pad
-            _y_hi    = UCL_fijo + _rng_pad
+
+            # Rango Y: cubre todos los límites activos con 12 % padding
+            _all_ys = ([UCL_fijo, LCL_fijo] +
+                       [_bnd[3] for _bnd in _bloque_boundaries] +
+                       [_bnd[4] for _bnd in _bloque_boundaries] +
+                       list(_all_xbar) + list(df_hist["xbar"]))
+            _rng_pad = (max(_all_ys) - min(_all_ys)) * 0.12 or 0.05
+            _y_lo    = min(_all_ys) - _rng_pad
+            _y_hi    = max(_all_ys) + _rng_pad
 
             fig_mon.update_layout(
-                template="plotly_white", height=400,
-                plot_bgcolor="#FAFCFF",
-                paper_bgcolor="white",
+                template="plotly_white", height=420,
+                plot_bgcolor="white", paper_bgcolor="white",
                 title=dict(
                     text=(f"Carta X̄ de Monitoreo — {n_hist} históricos + {n_new} nuevos"
                           f"{'  |  🚨 ' + str(len(new_signals)) + ' señal(es)' if new_signals else '  |  ✅ Proceso estable'}"),
                     font=dict(size=13, color=_LIM_COLOR if new_signals else _LC_COLOR,
-                              family="IBM Plex Sans, sans-serif"),
+                              family="DM Sans, sans-serif"),
                     x=0, xanchor="left", pad=dict(l=4)
                 ),
                 xaxis=dict(
                     title=dict(text="Número de Subgrupo", font=dict(size=11)),
                     tickmode="linear", tickfont=dict(size=10),
-                    range=[0, n_hist+n_new+1],
-                    gridcolor="#E8EDF2", gridwidth=1, zeroline=False,
+                    range=[0, n_hist+n_new+2],
+                    gridcolor="#EEF3F8", gridwidth=1, zeroline=False,
+                    linecolor="#DDE5ED", linewidth=1,
                 ),
                 yaxis=dict(
                     title=dict(text="Peso promedio x̄ (kg)", font=dict(size=11)),
-                    tickfont=dict(size=10),
+                    tickfont=dict(size=10), tickformat=".4f",
                     range=[_y_lo, _y_hi],
-                    gridcolor="#E8EDF2", gridwidth=1, zeroline=False,
+                    gridcolor="#EEF3F8", gridwidth=1, zeroline=False,
+                    linecolor="#DDE5ED", linewidth=1,
                 ),
                 legend=dict(orientation="h", y=1.07, x=0,
                             font=dict(size=10), bgcolor="rgba(255,255,255,0)"),
                 hoverlabel=dict(bgcolor="white", bordercolor="#D5D8DC",
-                                font=dict(size=11, family="IBM Plex Sans, sans-serif")),
-                margin=dict(l=50, r=110, t=65, b=45),
+                                font=dict(size=11, family="DM Sans, sans-serif")),
+                margin=dict(l=52, r=200, t=65, b=48),
             )
 
-            # Carta R
+            # ════════════════════════════════════════════════════════════════════
+            # CARTA R  — límites segmentados por bloque
+            # ════════════════════════════════════════════════════════════════════
             fig_mon_r = go.Figure()
+
+            # Líneas de control Fase I
             for y, lbl, col_ln, dash, lw in [
-                (UCLr_fijo, f"LCS = {UCLr_fijo:.3f}", _LIM_COLOR, "dash",  2.5),
-                (CLr_fijo,  f"R̄ = {CLr_fijo:.3f}",   "#1E8449",  "solid", 2.2),
+                (UCLr_fijo, f"LCS₀={UCLr_fijo:.3f}", _LIM_COLOR, "dash",  1.8),
+                (CLr_fijo,  f"R̄₀={CLr_fijo:.3f}",   _C_GREEN,   "solid", 1.8),
             ]:
-                fig_mon_r.add_hline(y=y, line_dash=dash, line_color=col_ln, line_width=lw,
-                                    annotation_text=lbl, annotation_position="right",
-                                    annotation_font_size=9, annotation_font_color=col_ln,
-                                    annotation_bgcolor="rgba(255,255,255,.75)")
+                fig_mon_r.add_shape(type="line",
+                    x0=0.5, x1=n_hist+0.5, y0=y, y1=y,
+                    line=dict(color=col_ln, dash=dash, width=lw))
+                fig_mon_r.add_annotation(
+                    x=n_hist+0.5, y=y, text=f" {lbl}", showarrow=False,
+                    xanchor="left", font=dict(size=9, color=col_ln),
+                    bgcolor="rgba(255,255,255,.7)")
             if LCLr_fijo > 0:
-                fig_mon_r.add_hline(y=LCLr_fijo, line_dash="dash", line_color=_LIM_COLOR,
-                                    line_width=2.5,
-                                    annotation_text=f"LCI = {LCLr_fijo:.3f}",
-                                    annotation_position="right", annotation_font_size=9,
-                                    annotation_font_color=_LIM_COLOR,
-                                    annotation_bgcolor="rgba(255,255,255,.75)")
-            fig_mon_r.add_vline(x=n_hist+0.5, line_dash="dot", line_color="#95A5A6",
-                                line_width=1.6)
-            new_r_signals = [i for i, rv in enumerate(_all_R) if rv > UCLr_fijo]
-            new_r_colors  = [_LIM_COLOR if i in new_r_signals else "#E67E22"
-                             for i in range(n_new)]
+                fig_mon_r.add_shape(type="line",
+                    x0=0.5, x1=n_hist+0.5, y0=LCLr_fijo, y1=LCLr_fijo,
+                    line=dict(color=_LIM_COLOR, dash="dash", width=1.8))
+                fig_mon_r.add_annotation(
+                    x=n_hist+0.5, y=LCLr_fijo, text=f" LCI₀={LCLr_fijo:.3f}",
+                    showarrow=False, xanchor="left", font=dict(size=9, color=_LIM_COLOR),
+                    bgcolor="rgba(255,255,255,.7)")
+
+            fig_mon_r.add_vline(x=n_hist+0.5, line_dash="dot", line_color="#7F8C8D",
+                                line_width=1.4)
+
+            # Líneas de control por bloque Fase II
+            _prev_right_r = n_hist + 0.5
+            for _bnd in _bloque_boundaries:
+                _bnd_start, _bnd_end, _bnd_num, _bk_UCL, _bk_LCL, _bk_CL, _bk_UCLr, _bk_LCLr, _bk_CLr, _bk_n = _bnd
+                _seg_x1_r = _bnd_end + 0.5
+                for y, lbl, col_ln, dash, lw in [
+                    (_bk_UCLr, f"LCS{_bnd_num}={_bk_UCLr:.3f} (n={_bk_n})", _LIM_COLOR, "dash",  1.8),
+                    (_bk_CLr,  f"R̄{_bnd_num}={_bk_CLr:.3f}",               _C_GREEN,   "solid", 1.8),
+                ]:
+                    fig_mon_r.add_shape(type="line",
+                        x0=_prev_right_r, x1=_seg_x1_r, y0=y, y1=y,
+                        line=dict(color=col_ln, dash=dash, width=lw))
+                    fig_mon_r.add_annotation(
+                        x=_seg_x1_r, y=y, text=f" {lbl}", showarrow=False,
+                        xanchor="left", font=dict(size=9, color=col_ln),
+                        bgcolor="rgba(255,255,255,.7)")
+                if _bk_LCLr > 0:
+                    fig_mon_r.add_shape(type="line",
+                        x0=_prev_right_r, x1=_seg_x1_r, y0=_bk_LCLr, y1=_bk_LCLr,
+                        line=dict(color=_LIM_COLOR, dash="dash", width=1.8))
+                if _bnd_num > 1:
+                    fig_mon_r.add_vline(x=_prev_right_r, line_dash="dot",
+                                        line_color="#8E44AD", line_width=1.2,
+                                        annotation_text=f"B{_bnd_num}",
+                                        annotation_font_size=9, annotation_font_color="#8E44AD",
+                                        annotation_bgcolor="rgba(255,255,255,.7)")
+                _prev_right_r = _seg_x1_r
+
+            # Serie R histórica
             fig_mon_r.add_trace(go.Scatter(
                 x=idx_hist, y=df_hist["R"], mode="lines+markers", name="R Histórico",
-                line=dict(color="#1E8449", width=1.6),
+                line=dict(color=_C_GREEN, width=1.5),
                 marker=dict(
-                    color=[_LIM_COLOR if ix in set(s["signals_r"]) else "#1E8449"
+                    color=[_LIM_COLOR if ix in set(s["signals_r"]) else _C_GREEN
                            for ix in df_hist.index],
-                    size=7, opacity=0.72, symbol="diamond",
-                    line=dict(color="white", width=1.1)
+                    size=7, opacity=0.75, symbol="diamond",
+                    line=dict(color="white", width=1.2)
                 ),
                 hovertemplate=(
                     "<b>Subgrupo %{x}</b><br>"
@@ -1498,11 +1629,12 @@ def page_monitoreo():
                     "<extra></extra>"
                 )
             ))
+            # Serie R Fase II
             fig_mon_r.add_trace(go.Scatter(
                 x=idx_new, y=_all_R, mode="lines+markers", name="R Nuevos",
-                line=dict(color="#E67E22", width=2.4),
-                marker=dict(color=new_r_colors, size=11, symbol="diamond",
-                            line=dict(color="white", width=2.0)),
+                line=dict(color=_C_NEW, width=2.2),
+                marker=dict(color=new_r_colors, size=10, symbol="diamond",
+                            line=dict(color="white", width=1.8)),
                 hovertemplate=(
                     "<b>Subgrupo %{x}</b><br>"
                     "R = %{y:.4f} kg<br>"
@@ -1510,30 +1642,46 @@ def page_monitoreo():
                     "<extra></extra>"
                 )
             ))
+            # Señales R
+            if new_r_signals:
+                si_r = [idx_new[i] for i in new_r_signals]
+                sv_r = [_all_R[i]  for i in new_r_signals]
+                fig_mon_r.add_trace(go.Scatter(
+                    x=si_r, y=sv_r, mode="markers", name="🚨 SEÑAL R",
+                    marker=dict(color=_LIM_COLOR, size=20, symbol="x-open",
+                                line=dict(color=_LIM_COLOR, width=3.5)),
+                    hovertemplate=(
+                        "<b>⚠ FUERA DE CONTROL</b><br>"
+                        "Subgrupo %{x}<br>"
+                        "R = %{y:.4f} kg"
+                        "<extra>🚨 Señal R</extra>"
+                    )
+                ))
+
             fig_mon_r.update_layout(
-                template="plotly_white", height=300,
-                plot_bgcolor="#FAFCFF",
-                paper_bgcolor="white",
-                title=dict(text="Carta R de Monitoreo — Variabilidad entre muestras",
-                           font=dict(size=12, color=_LC_COLOR,
-                                     family="IBM Plex Sans, sans-serif"),
+                template="plotly_white", height=310,
+                plot_bgcolor="white", paper_bgcolor="white",
+                title=dict(text="Carta R de Monitoreo — Variabilidad entre muestras (límites por bloque)",
+                           font=dict(size=12, color=_LC_COLOR, family="DM Sans, sans-serif"),
                            x=0, xanchor="left", pad=dict(l=4)),
                 xaxis=dict(
                     title=dict(text="Subgrupo", font=dict(size=11)),
                     tickmode="linear", tickfont=dict(size=10),
-                    range=[0, n_hist+n_new+1],
-                    gridcolor="#E8EDF2", gridwidth=1, zeroline=False,
+                    range=[0, n_hist+n_new+2],
+                    gridcolor="#EEF3F8", gridwidth=1, zeroline=False,
+                    linecolor="#DDE5ED", linewidth=1,
                 ),
                 yaxis=dict(
-                    title=dict(text="Rango (kg)", font=dict(size=11)),
-                    tickfont=dict(size=10),
-                    gridcolor="#E8EDF2", gridwidth=1, zeroline=False,
+                    title=dict(text="Rango R (kg)", font=dict(size=11)),
+                    tickfont=dict(size=10), tickformat=".4f",
+                    gridcolor="#EEF3F8", gridwidth=1, zeroline=False,
+                    linecolor="#DDE5ED", linewidth=1, rangemode="tozero",
                 ),
-                legend=dict(orientation="h", y=1.1, x=0,
+                legend=dict(orientation="h", y=1.12, x=0,
                             font=dict(size=10), bgcolor="rgba(255,255,255,0)"),
                 hoverlabel=dict(bgcolor="white", bordercolor="#D5D8DC",
-                                font=dict(size=11, family="IBM Plex Sans, sans-serif")),
-                margin=dict(l=50, r=110, t=60, b=45),
+                                font=dict(size=11, family="DM Sans, sans-serif")),
+                margin=dict(l=52, r=200, t=60, b=48),
             )
 
             # Guardar señales en session_state para las alertas y exportación
@@ -1543,17 +1691,19 @@ def page_monitoreo():
                 if _bloques[_bi].get("_df_proc") is not None
                 else pd.DataFrame(columns=x_cols_mon + ["xbar", "R"])
             )
-            st.session_state["mon_fig_x"]       = fig_mon
-            st.session_state["mon_fig_r"]       = fig_mon_r
-            st.session_state["mon_new_signals"]  = new_signals
-            st.session_state["mon_new_r_signals"]= new_r_signals
-            st.session_state["mon_idx_new"]      = idx_new
-            st.session_state["mon_df_nuevos"]    = _df_nuevos_para_export.copy()
-            st.session_state["mon_n_new"]        = n_new
-            st.session_state["mon_n_hist"]       = n_hist
+            st.session_state["mon_fig_x"]            = fig_mon
+            st.session_state["mon_fig_r"]            = fig_mon_r
+            st.session_state["mon_new_signals"]      = new_signals
+            st.session_state["mon_new_r_signals"]    = new_r_signals
+            st.session_state["mon_idx_new"]          = idx_new
+            st.session_state["mon_df_nuevos"]        = _df_nuevos_para_export.copy()
+            st.session_state["mon_n_new"]            = n_new
+            st.session_state["mon_n_hist"]           = n_hist
             # Listas globales para alertas (índices coinciden con new_signals)
-            st.session_state["mon_all_xbar"]     = list(_all_xbar)
-            st.session_state["mon_all_R"]        = list(_all_R)
+            st.session_state["mon_all_xbar"]         = list(_all_xbar)
+            st.session_state["mon_all_R"]            = list(_all_R)
+            # Límites por bloque (para exportación HTML)
+            st.session_state["mon_bloque_boundaries"] = _bloque_boundaries
 
         # ── Renderizar figuras (desde session_state) ──────────────────────────
         st.markdown(render_section_title("📈 Carta X̄ — Histórico + Nuevos Subgrupos"),
@@ -1863,15 +2013,41 @@ def page_monitoreo():
   </div>
 
   <div class="section">
-    <div class="section-title">Límites de Control Fijos — Fase I</div>
-    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:.5rem;font-size:.8rem">
-      <div><strong>LCS X̄</strong><br>{UCL_fijo:.4f} kg</div>
-      <div><strong>LC X̄</strong><br>{CL_fijo:.4f} kg</div>
-      <div><strong>LCI X̄</strong><br>{LCL_fijo:.4f} kg</div>
-      <div><strong>LCS R</strong><br>{UCLr_fijo:.4f} kg</div>
-      <div><strong>R̄</strong><br>{CLr_fijo:.4f} kg</div>
-      <div><strong>n (fijo)</strong><br>{n_fijo}</div>
-    </div>
+    <div class="section-title">Límites de Control por Bloque</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Bloque</th>
+          <th style="text-align:center">n</th>
+          <th style="text-align:right">x̄̄ (kg)</th>
+          <th style="text-align:right">R̄ (kg)</th>
+          <th style="text-align:right">LCS X̄</th>
+          <th style="text-align:right">LCI X̄</th>
+          <th style="text-align:right">LCS R</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="background:#EEF3F8">
+          <td style="font-weight:600">Fase I (referencia)</td>
+          <td style="text-align:center;font-family:monospace">{n_fijo}</td>
+          <td style="text-align:right;font-family:monospace">{CL_fijo:.4f}</td>
+          <td style="text-align:right;font-family:monospace">{CLr_fijo:.4f}</td>
+          <td style="text-align:right;font-family:monospace">{UCL_fijo:.4f}</td>
+          <td style="text-align:right;font-family:monospace">{LCL_fijo:.4f}</td>
+          <td style="text-align:right;font-family:monospace">{UCLr_fijo:.4f}</td>
+        </tr>
+        {''.join(
+          f"<tr><td style='font-weight:600'>Bloque {_bnd[2]}</td>"
+          f"<td style='text-align:center;font-family:monospace'>{_bnd[9]}</td>"
+          f"<td style='text-align:right;font-family:monospace'>{_bnd[5]:.4f}</td>"
+          f"<td style='text-align:right;font-family:monospace'>{_bnd[8]:.4f}</td>"
+          f"<td style='text-align:right;font-family:monospace'>{_bnd[3]:.4f}</td>"
+          f"<td style='text-align:right;font-family:monospace'>{_bnd[4]:.4f}</td>"
+          f"<td style='text-align:right;font-family:monospace'>{_bnd[6]:.4f}</td></tr>"
+          for _bnd in st.session_state.get("mon_bloque_boundaries", [])
+        )}
+      </tbody>
+    </table>
   </div>
 
   <div class="section">
